@@ -3,6 +3,7 @@ services:
     build: .
     container_name: comfy-tg-bot
     restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
     environment:
       - COMFY_BOT_TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - COMFY_BOT_TELEGRAM_ALLOWED_USERS=${ALLOWED_USERS}
@@ -13,5 +14,6 @@ services:
       - COMFY_BOT_LOGGING_JSON_FORMAT=${LOG_JSON:-true}
     volumes:
       - ./workflow.json:/app/workflow.json:ro
+      - ${CONFIG_PATH}:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"

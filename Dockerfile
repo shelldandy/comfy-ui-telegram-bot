@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache ca-certificates git
 
@@ -19,13 +19,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     ./cmd/bot
 
 # Runtime stage
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.21
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --no-cache ca-certificates \
+    && mkdir -p /app/data
+
 COPY --from=builder /build/comfy-tg-bot /app/comfy-tg-bot
 
 WORKDIR /app
-
-USER nonroot:nonroot
 
 ENTRYPOINT ["/app/comfy-tg-bot"]

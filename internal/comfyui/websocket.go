@@ -50,6 +50,8 @@ func (m *ExecutionMonitor) WaitForCompletion(ctx context.Context, promptID strin
 	}
 	defer conn.Close()
 
+	m.logger.Info("websocket connected", "url", url, "prompt_id", promptID)
+
 	// Set up read deadline management
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -105,6 +107,8 @@ func (m *ExecutionMonitor) WaitForCompletion(ctx context.Context, promptID strin
 		case msg := <-msgCh:
 			// Reset read deadline on any message
 			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+			m.logger.Debug("received ws message", "type", msg.Type, "data", string(msg.Data))
 
 			switch msg.Type {
 			case "executing":

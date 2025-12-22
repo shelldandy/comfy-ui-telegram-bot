@@ -7,12 +7,13 @@ A Go-based Telegram bot that generates images using ComfyUI. Send a text prompt 
 - Text-to-image generation via ComfyUI
 - Whitelist-based access control
 - Returns both PNG (original) and JPEG (compressed preview)
+- Per-user settings for image delivery preferences
 - Per-user request limiting (one generation at a time per user)
 - Graceful shutdown handling
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.24+
 - ComfyUI running and accessible
 - Telegram Bot token (from @BotFather)
 
@@ -76,6 +77,9 @@ Configuration can be set via:
 | `COMFY_BOT_TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs |
 | `COMFY_BOT_COMFYUI_BASE_URL` | ComfyUI HTTP URL |
 | `COMFY_BOT_COMFYUI_WORKFLOW_PATH` | Path to workflow JSON |
+| `COMFY_BOT_SETTINGS_DATABASE_PATH` | Path to SQLite database for user settings (default: `data/settings.db`) |
+| `COMFY_BOT_SETTINGS_SEND_ORIGINAL` | Default setting for sending original PNG (default: `true`) |
+| `COMFY_BOT_SETTINGS_SEND_COMPRESSED` | Default setting for sending compressed JPEG (default: `true`) |
 
 ## Workflow Setup
 
@@ -101,6 +105,7 @@ Your workflow JSON must contain the `{{PROMPT}}` placeholder. Example structure:
 
 - `/start` - Welcome message
 - `/help` - Usage instructions
+- `/settings` - Configure image delivery preferences (toggle original PNG / compressed JPEG)
 - `/status` - Check ComfyUI server status
 
 ## License
