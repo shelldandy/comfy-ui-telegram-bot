@@ -63,6 +63,19 @@ func Load() (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
+	// Explicitly bind nested keys to env vars (required for Unmarshal)
+	v.BindEnv("telegram.bot_token")
+	v.BindEnv("telegram.allowed_users")
+	v.BindEnv("telegram.polling_timeout")
+	v.BindEnv("telegram.request_timeout")
+	v.BindEnv("comfyui.base_url")
+	v.BindEnv("comfyui.websocket_url")
+	v.BindEnv("comfyui.workflow_path")
+	v.BindEnv("comfyui.timeout")
+	v.BindEnv("image.jpeg_quality")
+	v.BindEnv("logging.level")
+	v.BindEnv("logging.json_format")
+
 	// Read config file (optional)
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
