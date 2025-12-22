@@ -1,0 +1,41 @@
+# ComfyUI Telegram Bot Configuration
+
+telegram:
+  # Telegram Bot API token (get from @BotFather)
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+
+  # List of Telegram user IDs allowed to use the bot
+  # Get your ID by messaging @userinfobot on Telegram
+  allowed_users:
+    - 123456789
+    - 987654321
+
+  # Long polling timeout in seconds (default: 60)
+  polling_timeout: 60
+
+  # Maximum time for a single request/generation (default: 5m)
+  request_timeout: 5m
+
+comfyui:
+  # ComfyUI HTTP API URL
+  base_url: "http://localhost:8188"
+
+  # ComfyUI WebSocket URL
+  websocket_url: "ws://localhost:8188/ws"
+
+  # Path to your workflow JSON file (must contain {{PROMPT}} placeholder)
+  workflow_path: "workflow.json"
+
+  # HTTP client timeout (default: 5m)
+  timeout: 5m
+
+image:
+  # JPEG compression quality for preview images (1-100, default: 80)
+  jpeg_quality: 80
+
+logging:
+  # Log level: debug, info, warn, error (default: info)
+  level: info
+
+  # Use JSON format for logs (default: false)
+  json_format: false
