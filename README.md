@@ -38,6 +38,30 @@ A Go-based Telegram bot that generates images using ComfyUI. Send a text prompt 
    ./bin/comfy-tg-bot
    ```
 
+## Docker Deployment
+
+1. Copy environment template:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` with your bot token and allowed user IDs
+
+3. Place your `workflow.json` in the project root
+
+4. Build and run:
+   ```bash
+   make docker-build
+   make docker-run
+   ```
+
+5. View logs:
+   ```bash
+   make docker-logs
+   ```
+
+The container uses `host.docker.internal` to connect to ComfyUI running on your host machine.
+
 ## Configuration
 
 Configuration can be set via:

@@ -1,0 +1,17 @@
+services:
+  comfy-tg-bot:
+    build: .
+    container_name: comfy-tg-bot
+    restart: unless-stopped
+    environment:
+      - COMFY_BOT_TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - COMFY_BOT_TELEGRAM_ALLOWED_USERS=${ALLOWED_USERS}
+      - COMFY_BOT_COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
+      - COMFY_BOT_COMFYUI_WEBSOCKET_URL=${COMFYUI_WEBSOCKET_URL:-ws://host.docker.internal:8188/ws}
+      - COMFY_BOT_COMFYUI_WORKFLOW_PATH=/app/workflow.json
+      - COMFY_BOT_LOGGING_LEVEL=${LOG_LEVEL:-info}
+      - COMFY_BOT_LOGGING_JSON_FORMAT=${LOG_JSON:-true}
+    volumes:
+      - ./workflow.json:/app/workflow.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
