@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	"comfy-tg-bot/internal/config"
 	"comfy-tg-bot/internal/image"
@@ -84,8 +85,16 @@ func main() {
 	}
 	defer settingsStore.Close()
 
+	// Initialize admin store (uses same database directory)
+	adminStore, err := admin.NewSQLiteStore(cfg.Settings.DatabasePath)
+	if err != nil {
+		logger.Error("failed to create admin store", "error", err)
+		os.Exit(1)
+	}
+	defer adminStore.Close()
+
 	// Initialize Telegram bot
-	bot, err := telegram.NewBot(cfg.Telegram, comfyClient, imageProcessor, userLimiter, settingsStore, logger)
+	bot, err := telegram.NewBot(cfg.Telegram, comfyClient, imageProcessor, userLimiter, settingsStore, adminStore, logger)
 	if err != nil {
 		logger.Error("failed to create telegram bot", "error", err)
 		os.Exit(1)
@@ -102,6 +111,7 @@ func main() {
 
 	logger.Info("bot started",
 		"allowed_users", cfg.Telegram.AllowedUsers,
+		"admin_user", cfg.Telegram.AdminUser,
 		"comfyui_url", cfg.ComfyUI.BaseURL,
 	)
 
