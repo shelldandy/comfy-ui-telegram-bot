@@ -6,6 +6,7 @@ A Go-based Telegram bot that generates images using ComfyUI. Send a text prompt 
 
 - Text-to-image generation via ComfyUI
 - Whitelist-based access control
+- Admin user with dynamic user approval/rejection
 - Returns both PNG (original) and JPEG (compressed preview)
 - Per-user settings for image delivery preferences
 - Per-user request limiting (one generation at a time per user)
@@ -74,7 +75,8 @@ Configuration can be set via:
 | Variable | Description |
 |----------|-------------|
 | `COMFY_BOT_TELEGRAM_BOT_TOKEN` | Telegram bot API token |
-| `COMFY_BOT_TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs |
+| `COMFY_BOT_TELEGRAM_ALLOWED_USERS` | Comma-separated user IDs (optional if `ADMIN_USER` is set) |
+| `COMFY_BOT_TELEGRAM_ADMIN_USER` | Admin user ID for approving new users (optional if `ALLOWED_USERS` is set) |
 | `COMFY_BOT_COMFYUI_BASE_URL` | ComfyUI HTTP URL |
 | `COMFY_BOT_COMFYUI_WORKFLOW_PATH` | Path to workflow JSON |
 | `COMFY_BOT_SETTINGS_DATABASE_PATH` | Path to SQLite database for user settings (default: `data/settings.db`) |
@@ -107,6 +109,18 @@ Your workflow JSON must contain the `{{PROMPT}}` placeholder. Example structure:
 - `/help` - Usage instructions
 - `/settings` - Configure image delivery preferences (toggle original PNG / compressed JPEG)
 - `/status` - Check ComfyUI server status
+- `/revoke <user_id>` - (Admin only) Revoke a user's access
+
+## Admin User Approval
+
+When `ADMIN_USER` is configured, the bot supports dynamic user approval:
+
+1. When an unauthorized user messages the bot, the admin receives a notification with **Approve** / **Reject** buttons
+2. If approved, the user is added to the database and can use the bot immediately
+3. If rejected, the user is notified and their request is removed
+4. The admin can later revoke access using `/revoke <user_id>`
+
+Approved users are stored in the SQLite database and have the same permissions as users in `ALLOWED_USERS`. Users in `ALLOWED_USERS` (from config) cannot be revoked - only dynamically approved users can be revoked.
 
 ## License
 

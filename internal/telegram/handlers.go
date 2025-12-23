@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	apperrors "comfy-tg-bot/internal/errors"
 	"comfy-tg-bot/internal/image"
@@ -17,13 +20,14 @@ import (
 
 // Handler processes Telegram updates
 type Handler struct {
-	bot       *tgbotapi.BotAPI
-	comfy     *comfyui.Client
-	processor *image.Processor
-	whitelist *Whitelist
-	limiter   *limiter.UserLimiter
-	settings  settings.Store
-	logger    *slog.Logger
+	bot        *tgbotapi.BotAPI
+	comfy      *comfyui.Client
+	processor  *image.Processor
+	whitelist  *Whitelist
+	limiter    *limiter.UserLimiter
+	settings   settings.Store
+	adminStore admin.Store
+	logger     *slog.Logger
 }
 
 // NewHandler creates a new update handler
@@ -34,26 +38,37 @@ func NewHandler(
 	whitelist *Whitelist,
 	limiter *limiter.UserLimiter,
 	settingsStore settings.Store,
+	adminStore admin.Store,
 	logger *slog.Logger,
 ) *Handler {
 	return &Handler{
-		bot:       bot,
-		comfy:     comfy,
-		processor: processor,
-		whitelist: whitelist,
-		limiter:   limiter,
-		settings:  settingsStore,
-		logger:    logger,
+		bot:        bot,
+		comfy:      comfy,
+		processor:  processor,
+		whitelist:  whitelist,
+		limiter:    limiter,
+		settings:   settingsStore,
+		adminStore: adminStore,
+		logger:     logger,
 	}
 }
 
 // HandleUpdate processes a single update
 func (h *Handler) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
+	// Handle admin callbacks first (admin must be able to approve even if callback is from unauthorized user's chat)
+	if update.CallbackQuery != nil {
+		data := update.CallbackQuery.Data
+		if strings.HasPrefix(data, "admin:") {
+			h.handleAdminCallback(ctx, update.CallbackQuery)
+			return
+		}
+	}
+
 	// Check whitelist
 	userID, allowed := h.whitelist.CheckAccess(update)
 	if !allowed {
 		if update.Message != nil {
-			h.sendText(update.Message.Chat.ID, apperrors.ErrUnauthorized.UserMsg)
+			h.handleUnauthorizedUser(ctx, update.Message)
 		}
 		return
 	}
@@ -93,18 +108,26 @@ func (h *Handler) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 				"/status - Check ComfyUI server status")
 
 	case "help":
-		h.sendText(msg.Chat.ID,
-			"Simply send me a text description of the image you want to generate.\n\n"+
-				"For example: \"A beautiful sunset over mountains with a lake reflection\"\n\n"+
-				"Commands:\n"+
-				"/settings - Configure image delivery preferences\n"+
-				"/status - Check ComfyUI server status")
+		helpText := "Simply send me a text description of the image you want to generate.\n\n" +
+			"For example: \"A beautiful sunset over mountains with a lake reflection\"\n\n" +
+			"Commands:\n" +
+			"/settings - Configure image delivery preferences\n" +
+			"/status - Check ComfyUI server status"
+
+		if h.whitelist.IsAdmin(msg.From.ID) {
+			helpText += "\n\nAdmin commands:\n/revoke <user_id> - Revoke user access"
+		}
+
+		h.sendText(msg.Chat.ID, helpText)
 
 	case "status":
 		h.handleStatus(ctx, msg)
 
 	case "settings":
 		h.handleSettings(ctx, msg)
+
+	case "revoke":
+		h.handleRevoke(ctx, msg)
 
 	default:
 		h.sendText(msg.Chat.ID, "Unknown command. Use /help for available commands.")
@@ -358,4 +381,228 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// handleUnauthorizedUser handles access attempts from non-whitelisted users
+func (h *Handler) handleUnauthorizedUser(ctx context.Context, msg *tgbotapi.Message) {
+	// If no admin is configured, just send the unauthorized message
+	if h.whitelist.AdminUserID() == 0 || h.adminStore == nil {
+		h.sendText(msg.Chat.ID, apperrors.ErrUnauthorized.UserMsg)
+		return
+	}
+
+	userID := msg.From.ID
+
+	// Check if already pending
+	pending, err := h.adminStore.GetPending(userID)
+	if err != nil {
+		h.logger.Error("failed to check pending status", "error", err, "user_id", userID)
+		h.sendText(msg.Chat.ID, apperrors.ErrUnauthorized.UserMsg)
+		return
+	}
+
+	if pending != nil && pending.NotifiedAt != nil {
+		// Already notified admin, just inform user
+		h.sendText(msg.Chat.ID, "Your access request is pending admin approval.")
+		return
+	}
+
+	// Add to pending if not exists
+	if pending == nil {
+		req := admin.PendingRequest{
+			UserID:      userID,
+			Username:    msg.From.UserName,
+			FirstName:   msg.From.FirstName,
+			ChatID:      msg.Chat.ID,
+			RequestedAt: time.Now(),
+		}
+		if err := h.adminStore.AddPending(req); err != nil {
+			h.logger.Error("failed to add pending request", "error", err, "user_id", userID)
+			h.sendText(msg.Chat.ID, apperrors.ErrUnauthorized.UserMsg)
+			return
+		}
+	}
+
+	// Notify admin
+	adminMsgID := h.notifyAdmin(userID, msg.From.UserName, msg.From.FirstName)
+	if adminMsgID > 0 {
+		if err := h.adminStore.UpdatePendingNotified(userID, adminMsgID); err != nil {
+			h.logger.Error("failed to update pending notified", "error", err, "user_id", userID)
+		}
+	}
+
+	h.sendText(msg.Chat.ID, "Your access request has been sent to the admin for approval.")
+}
+
+// notifyAdmin sends an approval request to the admin
+func (h *Handler) notifyAdmin(userID int64, username, firstName string) int {
+	adminChatID := h.whitelist.AdminUserID()
+
+	usernameDisplay := username
+	if usernameDisplay == "" {
+		usernameDisplay = "(none)"
+	} else {
+		usernameDisplay = "@" + usernameDisplay
+	}
+
+	nameDisplay := firstName
+	if nameDisplay == "" {
+		nameDisplay = "(none)"
+	}
+
+	text := fmt.Sprintf(
+		"New access request:\n\n"+
+			"User ID: %d\n"+
+			"Username: %s\n"+
+			"Name: %s",
+		userID, usernameDisplay, nameDisplay,
+	)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Approve", fmt.Sprintf("admin:approve:%d", userID)),
+			tgbotapi.NewInlineKeyboardButtonData("Reject", fmt.Sprintf("admin:reject:%d", userID)),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(adminChatID, text)
+	msg.ReplyMarkup = keyboard
+
+	sent, err := h.bot.Send(msg)
+	if err != nil {
+		h.logger.Error("failed to notify admin", "error", err)
+		return 0
+	}
+	return sent.MessageID
+}
+
+// handleAdminCallback handles approve/reject callbacks from the admin
+func (h *Handler) handleAdminCallback(ctx context.Context, query *tgbotapi.CallbackQuery) {
+	if !h.whitelist.IsAdmin(query.From.ID) {
+		h.answerCallback(query.ID, "Unauthorized")
+		return
+	}
+
+	data := query.Data
+	parts := strings.Split(strings.TrimPrefix(data, "admin:"), ":")
+	if len(parts) != 2 {
+		h.answerCallback(query.ID, "Invalid action")
+		return
+	}
+
+	action := parts[0]
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		h.answerCallback(query.ID, "Invalid user ID")
+		return
+	}
+
+	pending, err := h.adminStore.GetPending(userID)
+	if err != nil {
+		h.logger.Error("failed to get pending request", "error", err, "user_id", userID)
+		h.answerCallback(query.ID, "Failed to get request")
+		return
+	}
+
+	if pending == nil {
+		h.answerCallback(query.ID, "Request not found or already processed")
+		return
+	}
+
+	switch action {
+	case "approve":
+		approved := admin.ApprovedUser{
+			UserID:     userID,
+			Username:   pending.Username,
+			ApprovedAt: time.Now(),
+			ApprovedBy: query.From.ID,
+		}
+		if err := h.adminStore.AddApproved(approved); err != nil {
+			h.logger.Error("failed to approve user", "error", err, "user_id", userID)
+			h.answerCallback(query.ID, "Failed to approve")
+			return
+		}
+		if err := h.adminStore.RemovePending(userID); err != nil {
+			h.logger.Error("failed to remove pending", "error", err, "user_id", userID)
+		}
+
+		// Notify user they were approved
+		h.sendText(pending.ChatID, "Your access has been approved! You can now use the bot.")
+
+		// Update admin message
+		usernameDisplay := pending.Username
+		if usernameDisplay == "" {
+			usernameDisplay = "(none)"
+		} else {
+			usernameDisplay = "@" + usernameDisplay
+		}
+		h.updateAdminMessage(query.Message.Chat.ID, query.Message.MessageID,
+			fmt.Sprintf("User %d (%s) approved", userID, usernameDisplay))
+
+		h.answerCallback(query.ID, "User approved")
+
+	case "reject":
+		if err := h.adminStore.RemovePending(userID); err != nil {
+			h.logger.Error("failed to remove pending", "error", err, "user_id", userID)
+		}
+
+		// Notify user they were rejected
+		h.sendText(pending.ChatID, "Your access request was denied.")
+
+		// Update admin message
+		usernameDisplay := pending.Username
+		if usernameDisplay == "" {
+			usernameDisplay = "(none)"
+		} else {
+			usernameDisplay = "@" + usernameDisplay
+		}
+		h.updateAdminMessage(query.Message.Chat.ID, query.Message.MessageID,
+			fmt.Sprintf("User %d (%s) rejected", userID, usernameDisplay))
+
+		h.answerCallback(query.ID, "User rejected")
+
+	default:
+		h.answerCallback(query.ID, "Unknown action")
+	}
+}
+
+// updateAdminMessage updates an admin notification message
+func (h *Handler) updateAdminMessage(chatID int64, msgID int, newText string) {
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, newText)
+	if _, err := h.bot.Send(edit); err != nil {
+		h.logger.Error("failed to update admin message", "error", err)
+	}
+}
+
+// handleRevoke handles the /revoke command for admins
+func (h *Handler) handleRevoke(ctx context.Context, msg *tgbotapi.Message) {
+	if !h.whitelist.IsAdmin(msg.From.ID) {
+		h.sendText(msg.Chat.ID, "This command is only available to admins.")
+		return
+	}
+
+	if h.adminStore == nil {
+		h.sendText(msg.Chat.ID, "Admin features are not configured.")
+		return
+	}
+
+	args := msg.CommandArguments()
+	if args == "" {
+		h.sendText(msg.Chat.ID, "Usage: /revoke <user_id>")
+		return
+	}
+
+	userID, err := strconv.ParseInt(strings.TrimSpace(args), 10, 64)
+	if err != nil {
+		h.sendText(msg.Chat.ID, "Invalid user ID. Usage: /revoke <user_id>")
+		return
+	}
+
+	if err := h.adminStore.RemoveApproved(userID); err != nil {
+		h.logger.Error("failed to revoke user", "error", err, "user_id", userID)
+		h.sendText(msg.Chat.ID, "Failed to revoke user access.")
+		return
+	}
+
+	h.sendText(msg.Chat.ID, fmt.Sprintf("User %d access has been revoked.", userID))
 }

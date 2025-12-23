@@ -19,6 +19,7 @@ type Config struct {
 type TelegramConfig struct {
 	BotToken       string        `mapstructure:"bot_token"`
 	AllowedUsers   []int64       `mapstructure:"allowed_users"`
+	AdminUser      int64         `mapstructure:"admin_user"`
 	PollingTimeout int           `mapstructure:"polling_timeout"`
 	RequestTimeout time.Duration `mapstructure:"request_timeout"`
 }
@@ -76,6 +77,7 @@ func Load() (*Config, error) {
 	// Explicitly bind nested keys to env vars (required for Unmarshal)
 	v.BindEnv("telegram.bot_token")
 	v.BindEnv("telegram.allowed_users")
+	v.BindEnv("telegram.admin_user")
 	v.BindEnv("telegram.polling_timeout")
 	v.BindEnv("telegram.request_timeout")
 	v.BindEnv("comfyui.base_url")
@@ -113,8 +115,8 @@ func (c *Config) Validate() error {
 	if c.Telegram.BotToken == "" {
 		return fmt.Errorf("telegram.bot_token is required")
 	}
-	if len(c.Telegram.AllowedUsers) == 0 {
-		return fmt.Errorf("telegram.allowed_users must contain at least one user ID")
+	if len(c.Telegram.AllowedUsers) == 0 && c.Telegram.AdminUser == 0 {
+		return fmt.Errorf("telegram.allowed_users or telegram.admin_user must be set")
 	}
 	if c.ComfyUI.WorkflowPath == "" {
 		return fmt.Errorf("comfyui.workflow_path is required")

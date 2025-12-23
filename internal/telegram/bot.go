@@ -9,6 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	"comfy-tg-bot/internal/config"
 	"comfy-tg-bot/internal/image"
@@ -34,6 +35,7 @@ func NewBot(
 	imageProcessor *image.Processor,
 	userLimiter *limiter.UserLimiter,
 	settingsStore settings.Store,
+	adminStore admin.Store,
 	logger *slog.Logger,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.BotToken)
@@ -41,8 +43,8 @@ func NewBot(
 		return nil, fmt.Errorf("create bot api: %w", err)
 	}
 
-	whitelist := NewWhitelist(cfg.AllowedUsers, logger)
-	handler := NewHandler(api, comfyClient, imageProcessor, whitelist, userLimiter, settingsStore, logger)
+	whitelist := NewWhitelist(cfg.AllowedUsers, adminStore, cfg.AdminUser, logger)
+	handler := NewHandler(api, comfyClient, imageProcessor, whitelist, userLimiter, settingsStore, adminStore, logger)
 
 	return &Bot{
 		api:     api,

@@ -4,30 +4,65 @@ import (
 	"log/slog"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"comfy-tg-bot/internal/admin"
 )
 
 // Whitelist manages allowed user IDs
 type Whitelist struct {
-	allowed map[int64]struct{}
-	logger  *slog.Logger
+	staticAllowed map[int64]struct{}
+	adminStore    admin.Store
+	adminUserID   int64
+	logger        *slog.Logger
 }
 
 // NewWhitelist creates a new whitelist from a slice of user IDs
-func NewWhitelist(userIDs []int64, logger *slog.Logger) *Whitelist {
+func NewWhitelist(userIDs []int64, adminStore admin.Store, adminUserID int64, logger *slog.Logger) *Whitelist {
 	allowed := make(map[int64]struct{}, len(userIDs))
 	for _, id := range userIDs {
 		allowed[id] = struct{}{}
 	}
 	return &Whitelist{
-		allowed: allowed,
-		logger:  logger,
+		staticAllowed: allowed,
+		adminStore:    adminStore,
+		adminUserID:   adminUserID,
+		logger:        logger,
 	}
 }
 
-// IsAllowed checks if a user is whitelisted
+// IsAllowed checks if a user is whitelisted (static or dynamically approved)
 func (w *Whitelist) IsAllowed(userID int64) bool {
-	_, ok := w.allowed[userID]
-	return ok
+	// Check static list first (fastest)
+	if _, ok := w.staticAllowed[userID]; ok {
+		return true
+	}
+
+	// Check if user is admin
+	if userID == w.adminUserID && w.adminUserID != 0 {
+		return true
+	}
+
+	// Check dynamic approved users from database
+	if w.adminStore != nil {
+		approved, err := w.adminStore.IsApproved(userID)
+		if err != nil {
+			w.logger.Error("failed to check approved status", "error", err, "user_id", userID)
+			return false
+		}
+		return approved
+	}
+
+	return false
+}
+
+// IsAdmin checks if a user is the admin
+func (w *Whitelist) IsAdmin(userID int64) bool {
+	return w.adminUserID != 0 && userID == w.adminUserID
+}
+
+// AdminUserID returns the admin user ID
+func (w *Whitelist) AdminUserID() int64 {
+	return w.adminUserID
 }
 
 // CheckAccess validates user access and logs unauthorized attempts
