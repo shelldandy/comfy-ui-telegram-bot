@@ -65,29 +65,64 @@ func (w *Whitelist) AdminUserID() int64 {
 	return w.adminUserID
 }
 
-// CheckAccess validates user access and logs unauthorized attempts
-// Returns the user ID and whether access is granted
-func (w *Whitelist) CheckAccess(update tgbotapi.Update) (int64, bool) {
-	var userID int64
+// IsGroupAllowed checks if a group has been approved for bot usage
+func (w *Whitelist) IsGroupAllowed(groupID int64) bool {
+	if w.adminStore != nil {
+		approved, err := w.adminStore.IsGroupApproved(groupID)
+		if err != nil {
+			w.logger.Error("failed to check group approved status", "error", err, "group_id", groupID)
+			return false
+		}
+		return approved
+	}
+	return false
+}
+
+// CheckAccess validates access and returns context information
+// Returns (userID, chatID, isGroup, allowed)
+func (w *Whitelist) CheckAccess(update tgbotapi.Update) (userID int64, chatID int64, isGroup bool, allowed bool) {
 	var username string
 
-	if update.Message != nil && update.Message.From != nil {
-		userID = update.Message.From.ID
-		username = update.Message.From.UserName
+	if update.Message != nil {
+		if update.Message.From != nil {
+			userID = update.Message.From.ID
+			username = update.Message.From.UserName
+		}
+		chatID = update.Message.Chat.ID
+		isGroup = update.Message.Chat.IsGroup() || update.Message.Chat.IsSuperGroup()
 	} else if update.CallbackQuery != nil && update.CallbackQuery.From != nil {
 		userID = update.CallbackQuery.From.ID
 		username = update.CallbackQuery.From.UserName
+		if update.CallbackQuery.Message != nil {
+			chatID = update.CallbackQuery.Message.Chat.ID
+			isGroup = update.CallbackQuery.Message.Chat.IsGroup() ||
+				update.CallbackQuery.Message.Chat.IsSuperGroup()
+		}
 	} else {
-		return 0, false
+		return 0, 0, false, false
 	}
 
+	// For groups, check group approval (not individual user)
+	if isGroup {
+		if !w.IsGroupAllowed(chatID) {
+			w.logger.Warn("unauthorized group access attempt",
+				"group_id", chatID,
+				"user_id", userID,
+				"username", username,
+			)
+			return userID, chatID, true, false
+		}
+		return userID, chatID, true, true
+	}
+
+	// For private chats, use existing user whitelist logic
 	if !w.IsAllowed(userID) {
 		w.logger.Warn("unauthorized access attempt",
 			"user_id", userID,
 			"username", username,
 		)
-		return userID, false
+		return userID, chatID, false, false
 	}
 
-	return userID, true
+	return userID, chatID, false, true
 }

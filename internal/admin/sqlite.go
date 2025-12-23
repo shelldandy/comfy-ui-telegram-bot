@@ -64,6 +64,35 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("create pending_requests table: %w", err)
 	}
 
+	// Create approved_groups table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS approved_groups (
+			group_id INTEGER PRIMARY KEY,
+			title TEXT,
+			approved_at DATETIME NOT NULL,
+			approved_by INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create approved_groups table: %w", err)
+	}
+
+	// Create pending_group_requests table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS pending_group_requests (
+			group_id INTEGER PRIMARY KEY,
+			title TEXT,
+			requested_at DATETIME NOT NULL,
+			notified_at DATETIME,
+			admin_msg_id INTEGER
+		)
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create pending_group_requests table: %w", err)
+	}
+
 	return &SQLiteStore{db: db}, nil
 }
 
@@ -186,4 +215,116 @@ func (s *SQLiteStore) UpdatePendingNotified(userID int64, msgID int) error {
 // Close releases database resources
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// IsGroupApproved checks if a group has been approved
+func (s *SQLiteStore) IsGroupApproved(groupID int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(
+		"SELECT 1 FROM approved_groups WHERE group_id = ?",
+		groupID,
+	).Scan(&exists)
+
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check group approved status: %w", err)
+	}
+	return true, nil
+}
+
+// AddApprovedGroup adds a group to the approved list
+func (s *SQLiteStore) AddApprovedGroup(group ApprovedGroup) error {
+	_, err := s.db.Exec(`
+		INSERT INTO approved_groups (group_id, title, approved_at, approved_by)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(group_id) DO UPDATE SET
+			title = excluded.title,
+			approved_at = excluded.approved_at,
+			approved_by = excluded.approved_by
+	`, group.GroupID, group.Title, group.ApprovedAt, group.ApprovedBy)
+
+	if err != nil {
+		return fmt.Errorf("add approved group: %w", err)
+	}
+	return nil
+}
+
+// RemoveApprovedGroup removes a group from the approved list
+func (s *SQLiteStore) RemoveApprovedGroup(groupID int64) error {
+	_, err := s.db.Exec("DELETE FROM approved_groups WHERE group_id = ?", groupID)
+	if err != nil {
+		return fmt.Errorf("remove approved group: %w", err)
+	}
+	return nil
+}
+
+// GetPendingGroup retrieves a pending group request by group ID
+func (s *SQLiteStore) GetPendingGroup(groupID int64) (*PendingGroupRequest, error) {
+	var req PendingGroupRequest
+	var notifiedAt sql.NullTime
+
+	err := s.db.QueryRow(`
+		SELECT group_id, title, requested_at, notified_at, admin_msg_id
+		FROM pending_group_requests WHERE group_id = ?
+	`, groupID).Scan(
+		&req.GroupID,
+		&req.Title,
+		&req.RequestedAt,
+		&notifiedAt,
+		&req.AdminMsgID,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get pending group request: %w", err)
+	}
+
+	if notifiedAt.Valid {
+		req.NotifiedAt = &notifiedAt.Time
+	}
+
+	return &req, nil
+}
+
+// AddPendingGroup adds a new pending group request
+func (s *SQLiteStore) AddPendingGroup(req PendingGroupRequest) error {
+	_, err := s.db.Exec(`
+		INSERT INTO pending_group_requests (group_id, title, requested_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(group_id) DO UPDATE SET
+			title = excluded.title,
+			requested_at = excluded.requested_at
+	`, req.GroupID, req.Title, req.RequestedAt)
+
+	if err != nil {
+		return fmt.Errorf("add pending group request: %w", err)
+	}
+	return nil
+}
+
+// RemovePendingGroup removes a pending group request
+func (s *SQLiteStore) RemovePendingGroup(groupID int64) error {
+	_, err := s.db.Exec("DELETE FROM pending_group_requests WHERE group_id = ?", groupID)
+	if err != nil {
+		return fmt.Errorf("remove pending group request: %w", err)
+	}
+	return nil
+}
+
+// UpdatePendingGroupNotified marks a pending group request as notified
+func (s *SQLiteStore) UpdatePendingGroupNotified(groupID int64, msgID int) error {
+	_, err := s.db.Exec(`
+		UPDATE pending_group_requests
+		SET notified_at = ?, admin_msg_id = ?
+		WHERE group_id = ?
+	`, time.Now(), msgID, groupID)
+
+	if err != nil {
+		return fmt.Errorf("update pending group notified: %w", err)
+	}
+	return nil
 }

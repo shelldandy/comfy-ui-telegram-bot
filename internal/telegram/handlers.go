@@ -55,20 +55,29 @@ func NewHandler(
 
 // HandleUpdate processes a single update
 func (h *Handler) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
-	// Handle admin callbacks first (admin must be able to approve even if callback is from unauthorized user's chat)
+	// Handle admin callbacks first (admin must be able to approve even if callback is from unauthorized chat)
 	if update.CallbackQuery != nil {
 		data := update.CallbackQuery.Data
 		if strings.HasPrefix(data, "admin:") {
 			h.handleAdminCallback(ctx, update.CallbackQuery)
 			return
 		}
+		if strings.HasPrefix(data, "admin_group:") {
+			h.handleAdminGroupCallback(ctx, update.CallbackQuery)
+			return
+		}
 	}
 
-	// Check whitelist
-	userID, allowed := h.whitelist.CheckAccess(update)
+	// Check whitelist with group awareness
+	userID, chatID, isGroup, allowed := h.whitelist.CheckAccess(update)
+
 	if !allowed {
 		if update.Message != nil {
-			h.handleUnauthorizedUser(ctx, update.Message)
+			if isGroup {
+				h.handleUnauthorizedGroup(ctx, update.Message)
+			} else {
+				h.handleUnauthorizedUser(ctx, update.Message)
+			}
 		}
 		return
 	}
@@ -85,13 +94,23 @@ func (h *Handler) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	msg := update.Message
 
-	// Handle commands
+	// For group chats, only respond to bot mentions
+	if isGroup {
+		prompt, hasMention := h.parseBotMention(msg)
+		if hasMention && prompt != "" {
+			h.handleGroupPrompt(ctx, msg, userID, chatID, prompt)
+		}
+		// Ignore non-mention messages in groups
+		return
+	}
+
+	// Handle commands (private chats only)
 	if msg.IsCommand() {
 		h.handleCommand(ctx, msg)
 		return
 	}
 
-	// Handle text messages as prompts
+	// Handle text messages as prompts (private chats)
 	if msg.Text != "" {
 		h.handlePrompt(ctx, msg, userID)
 	}
@@ -110,12 +129,15 @@ func (h *Handler) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 	case "help":
 		helpText := "Simply send me a text description of the image you want to generate.\n\n" +
 			"For example: \"A beautiful sunset over mountains with a lake reflection\"\n\n" +
+			"In groups, mention me with @" + h.bot.Self.UserName + " followed by your prompt.\n\n" +
 			"Commands:\n" +
 			"/settings - Configure image delivery preferences\n" +
 			"/status - Check ComfyUI server status"
 
 		if h.whitelist.IsAdmin(msg.From.ID) {
-			helpText += "\n\nAdmin commands:\n/revoke <user_id> - Revoke user access"
+			helpText += "\n\nAdmin commands:\n" +
+				"/revoke <user_id> - Revoke user access\n" +
+				"/revokegroup <group_id> - Revoke group access"
 		}
 
 		h.sendText(msg.Chat.ID, helpText)
@@ -128,6 +150,9 @@ func (h *Handler) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 
 	case "revoke":
 		h.handleRevoke(ctx, msg)
+
+	case "revokegroup":
+		h.handleRevokeGroup(ctx, msg)
 
 	default:
 		h.sendText(msg.Chat.ID, "Unknown command. Use /help for available commands.")
@@ -605,4 +630,325 @@ func (h *Handler) handleRevoke(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	h.sendText(msg.Chat.ID, fmt.Sprintf("User %d access has been revoked.", userID))
+}
+
+// parseBotMention checks if the message contains a mention of the bot
+// and extracts the prompt text after/around the mention
+func (h *Handler) parseBotMention(msg *tgbotapi.Message) (string, bool) {
+	if msg.Text == "" {
+		return "", false
+	}
+
+	botUsername := "@" + h.bot.Self.UserName
+
+	// Check if message contains bot mention (case-insensitive)
+	if !strings.Contains(strings.ToLower(msg.Text), strings.ToLower(botUsername)) {
+		return "", false
+	}
+
+	// Check entities for proper mention detection
+	for _, entity := range msg.Entities {
+		if entity.Type == "mention" {
+			mentionText := msg.Text[entity.Offset : entity.Offset+entity.Length]
+			if strings.EqualFold(mentionText, botUsername) {
+				// Extract text before and after the mention
+				beforeMention := strings.TrimSpace(msg.Text[:entity.Offset])
+				afterMention := strings.TrimSpace(msg.Text[entity.Offset+entity.Length:])
+
+				// Combine both parts as prompt
+				var prompt string
+				if beforeMention != "" && afterMention != "" {
+					prompt = beforeMention + " " + afterMention
+				} else if beforeMention != "" {
+					prompt = beforeMention
+				} else {
+					prompt = afterMention
+				}
+
+				return prompt, true
+			}
+		}
+	}
+
+	// Fallback: case-insensitive replacement if entities don't match
+	lowerText := strings.ToLower(msg.Text)
+	lowerUsername := strings.ToLower(botUsername)
+	idx := strings.Index(lowerText, lowerUsername)
+	if idx >= 0 {
+		prompt := strings.TrimSpace(msg.Text[:idx] + msg.Text[idx+len(botUsername):])
+		return prompt, true
+	}
+
+	return "", false
+}
+
+// handleGroupPrompt handles image generation requests from groups
+func (h *Handler) handleGroupPrompt(ctx context.Context, msg *tgbotapi.Message, userID, groupID int64, prompt string) {
+	prompt = strings.TrimSpace(prompt)
+
+	if len(prompt) < 3 {
+		h.sendText(msg.Chat.ID, "Please provide a more detailed prompt (at least 3 characters).")
+		return
+	}
+
+	// Check if user already has an active request (rate limit per user, not per group)
+	if !h.limiter.TryAcquire(userID) {
+		h.sendText(msg.Chat.ID, apperrors.ErrGenerationInProgress.UserMsg)
+		return
+	}
+	defer h.limiter.Release(userID)
+
+	// Send "generating" message
+	statusMsg, err := h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "Generating your image..."))
+	if err != nil {
+		h.logger.Error("failed to send status message", "error", err)
+	}
+
+	// Generate image
+	h.logger.Info("starting group generation",
+		"user_id", userID,
+		"group_id", groupID,
+		"prompt_length", len(prompt))
+
+	imageData, err := h.comfy.GenerateImage(ctx, prompt)
+	if err != nil {
+		h.logger.Error("generation failed", "error", err, "user_id", userID, "group_id", groupID)
+		h.sendText(msg.Chat.ID, apperrors.GetUserMessage(err))
+
+		if statusMsg.MessageID != 0 {
+			h.bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+		}
+		return
+	}
+
+	// Process image
+	result, err := h.processor.Process(imageData)
+	if err != nil {
+		h.logger.Error("image processing failed", "error", err)
+		h.sendText(msg.Chat.ID, "Failed to process the generated image.")
+		return
+	}
+
+	h.logger.Info("group generation complete",
+		"user_id", userID,
+		"group_id", groupID,
+		"compressed_size", result.CompressedSize,
+	)
+
+	// Delete "generating" message
+	if statusMsg.MessageID != 0 {
+		h.bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+	}
+
+	// Send ONLY compressed version for groups
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{
+		Name:  "image.jpg",
+		Bytes: result.Compressed,
+	})
+	photoMsg.Caption = fmt.Sprintf("Prompt: %s", truncate(prompt, 200))
+	photoMsg.ReplyToMessageID = msg.MessageID // Reply to the original request
+
+	if _, err := h.bot.Send(photoMsg); err != nil {
+		h.logger.Error("failed to send photo to group", "error", err)
+	}
+}
+
+// handleUnauthorizedGroup handles access attempts from unapproved groups
+func (h *Handler) handleUnauthorizedGroup(ctx context.Context, msg *tgbotapi.Message) {
+	// Only process if this is a mention of the bot
+	_, hasMention := h.parseBotMention(msg)
+	if !hasMention {
+		return
+	}
+
+	// If no admin is configured, just ignore
+	if h.whitelist.AdminUserID() == 0 || h.adminStore == nil {
+		return
+	}
+
+	groupID := msg.Chat.ID
+	groupTitle := msg.Chat.Title
+
+	// Check if already pending
+	pending, err := h.adminStore.GetPendingGroup(groupID)
+	if err != nil {
+		h.logger.Error("failed to check pending group status", "error", err, "group_id", groupID)
+		return
+	}
+
+	if pending != nil && pending.NotifiedAt != nil {
+		// Already notified admin, ignore further requests
+		return
+	}
+
+	// Add to pending if not exists
+	if pending == nil {
+		req := admin.PendingGroupRequest{
+			GroupID:     groupID,
+			Title:       groupTitle,
+			RequestedAt: time.Now(),
+		}
+		if err := h.adminStore.AddPendingGroup(req); err != nil {
+			h.logger.Error("failed to add pending group request", "error", err, "group_id", groupID)
+			return
+		}
+	}
+
+	// Notify admin
+	adminMsgID := h.notifyAdminAboutGroup(groupID, groupTitle)
+	if adminMsgID > 0 {
+		if err := h.adminStore.UpdatePendingGroupNotified(groupID, adminMsgID); err != nil {
+			h.logger.Error("failed to update pending group notified", "error", err, "group_id", groupID)
+		}
+	}
+}
+
+// notifyAdminAboutGroup sends an approval request to the admin for a group
+func (h *Handler) notifyAdminAboutGroup(groupID int64, title string) int {
+	adminChatID := h.whitelist.AdminUserID()
+
+	titleDisplay := title
+	if titleDisplay == "" {
+		titleDisplay = "(unnamed group)"
+	}
+
+	text := fmt.Sprintf(
+		"New group access request:\n\n"+
+			"Group ID: %d\n"+
+			"Title: %s",
+		groupID, titleDisplay,
+	)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Approve", fmt.Sprintf("admin_group:approve:%d", groupID)),
+			tgbotapi.NewInlineKeyboardButtonData("Reject", fmt.Sprintf("admin_group:reject:%d", groupID)),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(adminChatID, text)
+	msg.ReplyMarkup = keyboard
+
+	sent, err := h.bot.Send(msg)
+	if err != nil {
+		h.logger.Error("failed to notify admin about group", "error", err)
+		return 0
+	}
+	return sent.MessageID
+}
+
+// handleAdminGroupCallback handles approve/reject callbacks for groups
+func (h *Handler) handleAdminGroupCallback(ctx context.Context, query *tgbotapi.CallbackQuery) {
+	if !h.whitelist.IsAdmin(query.From.ID) {
+		h.answerCallback(query.ID, "Unauthorized")
+		return
+	}
+
+	data := query.Data
+	parts := strings.Split(strings.TrimPrefix(data, "admin_group:"), ":")
+	if len(parts) != 2 {
+		h.answerCallback(query.ID, "Invalid action")
+		return
+	}
+
+	action := parts[0]
+	groupID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		h.answerCallback(query.ID, "Invalid group ID")
+		return
+	}
+
+	pending, err := h.adminStore.GetPendingGroup(groupID)
+	if err != nil {
+		h.logger.Error("failed to get pending group request", "error", err, "group_id", groupID)
+		h.answerCallback(query.ID, "Failed to get request")
+		return
+	}
+
+	if pending == nil {
+		h.answerCallback(query.ID, "Request not found or already processed")
+		return
+	}
+
+	switch action {
+	case "approve":
+		approved := admin.ApprovedGroup{
+			GroupID:    groupID,
+			Title:      pending.Title,
+			ApprovedAt: time.Now(),
+			ApprovedBy: query.From.ID,
+		}
+		if err := h.adminStore.AddApprovedGroup(approved); err != nil {
+			h.logger.Error("failed to approve group", "error", err, "group_id", groupID)
+			h.answerCallback(query.ID, "Failed to approve")
+			return
+		}
+		if err := h.adminStore.RemovePendingGroup(groupID); err != nil {
+			h.logger.Error("failed to remove pending group", "error", err, "group_id", groupID)
+		}
+
+		// Notify group they were approved
+		h.sendText(groupID, "This group has been approved! You can now use the bot by mentioning @"+h.bot.Self.UserName+" followed by your prompt.")
+
+		// Update admin message
+		titleDisplay := pending.Title
+		if titleDisplay == "" {
+			titleDisplay = "(unnamed)"
+		}
+		h.updateAdminMessage(query.Message.Chat.ID, query.Message.MessageID,
+			fmt.Sprintf("Group %d (%s) approved", groupID, titleDisplay))
+
+		h.answerCallback(query.ID, "Group approved")
+
+	case "reject":
+		if err := h.adminStore.RemovePendingGroup(groupID); err != nil {
+			h.logger.Error("failed to remove pending group", "error", err, "group_id", groupID)
+		}
+
+		// Update admin message
+		titleDisplay := pending.Title
+		if titleDisplay == "" {
+			titleDisplay = "(unnamed)"
+		}
+		h.updateAdminMessage(query.Message.Chat.ID, query.Message.MessageID,
+			fmt.Sprintf("Group %d (%s) rejected", groupID, titleDisplay))
+
+		h.answerCallback(query.ID, "Group rejected")
+
+	default:
+		h.answerCallback(query.ID, "Unknown action")
+	}
+}
+
+// handleRevokeGroup handles the /revokegroup command for admins
+func (h *Handler) handleRevokeGroup(ctx context.Context, msg *tgbotapi.Message) {
+	if !h.whitelist.IsAdmin(msg.From.ID) {
+		h.sendText(msg.Chat.ID, "This command is only available to admins.")
+		return
+	}
+
+	if h.adminStore == nil {
+		h.sendText(msg.Chat.ID, "Admin features are not configured.")
+		return
+	}
+
+	args := msg.CommandArguments()
+	if args == "" {
+		h.sendText(msg.Chat.ID, "Usage: /revokegroup <group_id>")
+		return
+	}
+
+	groupID, err := strconv.ParseInt(strings.TrimSpace(args), 10, 64)
+	if err != nil {
+		h.sendText(msg.Chat.ID, "Invalid group ID. Usage: /revokegroup <group_id>")
+		return
+	}
+
+	if err := h.adminStore.RemoveApprovedGroup(groupID); err != nil {
+		h.logger.Error("failed to revoke group", "error", err, "group_id", groupID)
+		h.sendText(msg.Chat.ID, "Failed to revoke group access.")
+		return
+	}
+
+	h.sendText(msg.Chat.ID, fmt.Sprintf("Group %d access has been revoked.", groupID))
 }
