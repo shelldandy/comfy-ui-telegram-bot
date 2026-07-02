@@ -8,8 +8,7 @@ A Go-based Telegram bot that generates images using ComfyUI. Send a text prompt 
 - Whitelist-based access control
 - Admin user with dynamic user/group approval/rejection
 - Group chat support via @mention
-- Returns both PNG (original) and JPEG (compressed preview)
-- Per-user settings for image delivery preferences
+- Sends a compressed JPEG preview with inline buttons to copy the original prompt or download the full-resolution PNG on demand
 - Per-user request limiting (one generation at a time per user)
 - Graceful shutdown handling
 
@@ -80,7 +79,7 @@ Configuration can be set via:
 | `COMFY_BOT_TELEGRAM_ADMIN_USER` | Admin user ID for approving new users (optional if `ALLOWED_USERS` is set) |
 | `COMFY_BOT_COMFYUI_BASE_URL` | ComfyUI HTTP URL |
 | `COMFY_BOT_COMFYUI_WORKFLOW_PATH` | Path to workflow JSON |
-| `COMFY_BOT_SETTINGS_DATABASE_PATH` | Path to SQLite database for user settings (default: `data/settings.db`) |
+| `COMFY_BOT_SETTINGS_DATABASE_PATH` | Path to SQLite database for bot data — approvals and generation history (default: `data/settings.db`) |
 | `COMFY_BOT_SETTINGS_SEND_ORIGINAL` | Default setting for sending original PNG (default: `true`) |
 | `COMFY_BOT_SETTINGS_SEND_COMPRESSED` | Default setting for sending compressed JPEG (default: `true`) |
 
@@ -108,7 +107,6 @@ Your workflow JSON must contain the `{{PROMPT}}` placeholder. Example structure:
 
 - `/start` - Welcome message
 - `/help` - Usage instructions
-- `/settings` - Configure image delivery preferences (toggle original PNG / compressed JPEG)
 - `/status` - Check ComfyUI server status
 - `/revoke <user_id>` - (Admin only) Revoke a user's access
 - `/revokegroup <group_id>` - (Admin only) Revoke a group's access

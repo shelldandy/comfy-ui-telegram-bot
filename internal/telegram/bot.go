@@ -12,9 +12,9 @@ import (
 	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	"comfy-tg-bot/internal/config"
+	"comfy-tg-bot/internal/generations"
 	"comfy-tg-bot/internal/image"
 	"comfy-tg-bot/internal/limiter"
-	"comfy-tg-bot/internal/settings"
 )
 
 // Bot represents the Telegram bot
@@ -34,7 +34,7 @@ func NewBot(
 	comfyClient *comfyui.Client,
 	imageProcessor *image.Processor,
 	userLimiter *limiter.UserLimiter,
-	settingsStore settings.Store,
+	generationsStore generations.Store,
 	adminStore admin.Store,
 	logger *slog.Logger,
 ) (*Bot, error) {
@@ -44,7 +44,7 @@ func NewBot(
 	}
 
 	whitelist := NewWhitelist(cfg.AllowedUsers, adminStore, cfg.AdminUser, logger)
-	handler := NewHandler(api, comfyClient, imageProcessor, whitelist, userLimiter, settingsStore, adminStore, logger)
+	handler := NewHandler(api, comfyClient, imageProcessor, whitelist, userLimiter, generationsStore, adminStore, logger)
 
 	return &Bot{
 		api:     api,

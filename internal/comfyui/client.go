@@ -41,51 +41,57 @@ func NewClient(cfg config.ComfyUIConfig, logger *slog.Logger) (*Client, error) {
 	}, nil
 }
 
-// GenerateImage is the main entry point for image generation
-func (c *Client) GenerateImage(ctx context.Context, prompt string) ([]byte, error) {
+// GenerateImage is the main entry point for image generation. It returns the
+// image bytes along with the ComfyUI file reference, so callers can persist the
+// reference and re-download the original later via GetImage.
+func (c *Client) GenerateImage(ctx context.Context, prompt string) ([]byte, ImageOutput, error) {
 	// Create execution monitor with unique client ID
 	monitor := NewExecutionMonitor(c.wsURL, c.logger)
 
 	// Prepare workflow
 	workflow, err := c.workflow.PrepareWorkflow(prompt)
 	if err != nil {
-		return nil, fmt.Errorf("prepare workflow: %w", err)
+		return nil, ImageOutput{}, fmt.Errorf("prepare workflow: %w", err)
 	}
 
 	// Queue the prompt
 	promptID, err := c.QueuePrompt(ctx, workflow, monitor.GetClientID())
 	if err != nil {
-		return nil, fmt.Errorf("queue prompt: %w", err)
+		return nil, ImageOutput{}, fmt.Errorf("queue prompt: %w", err)
 	}
 
 	c.logger.Debug("prompt queued", "prompt_id", promptID)
 
 	// Wait for completion
 	if err := monitor.WaitForCompletion(ctx, promptID, nil); err != nil {
-		return nil, fmt.Errorf("wait for completion: %w", err)
+		return nil, ImageOutput{}, fmt.Errorf("wait for completion: %w", err)
 	}
 
 	// Get history to find output
 	history, err := c.GetHistory(ctx, promptID)
 	if err != nil {
-		return nil, fmt.Errorf("get history: %w", err)
+		return nil, ImageOutput{}, fmt.Errorf("get history: %w", err)
 	}
 
 	// Find output image
 	entry, ok := history[promptID]
 	if !ok {
-		return nil, fmt.Errorf("prompt not found in history")
+		return nil, ImageOutput{}, fmt.Errorf("prompt not found in history")
 	}
 
 	// Find first image in outputs
 	for _, output := range entry.Outputs {
 		if len(output.Images) > 0 {
 			img := output.Images[0]
-			return c.GetImage(ctx, img.Filename, img.Subfolder, img.Type)
+			data, err := c.GetImage(ctx, img.Filename, img.Subfolder, img.Type)
+			if err != nil {
+				return nil, ImageOutput{}, err
+			}
+			return data, img, nil
 		}
 	}
 
-	return nil, fmt.Errorf("no output image found")
+	return nil, ImageOutput{}, fmt.Errorf("no output image found")
 }
 
 // QueuePrompt sends a prompt to ComfyUI

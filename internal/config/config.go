@@ -41,9 +41,7 @@ type LoggingConfig struct {
 }
 
 type SettingsConfig struct {
-	DatabasePath   string `mapstructure:"database_path"`
-	SendOriginal   bool   `mapstructure:"send_original"`
-	SendCompressed bool   `mapstructure:"send_compressed"`
+	DatabasePath string `mapstructure:"database_path"`
 }
 
 func Load() (*Config, error) {
@@ -59,8 +57,6 @@ func Load() (*Config, error) {
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.json_format", false)
 	v.SetDefault("settings.database_path", "data/settings.db")
-	v.SetDefault("settings.send_original", true)
-	v.SetDefault("settings.send_compressed", true)
 
 	// Config file locations
 	v.SetConfigName("config")
@@ -88,8 +84,6 @@ func Load() (*Config, error) {
 	v.BindEnv("logging.level")
 	v.BindEnv("logging.json_format")
 	v.BindEnv("settings.database_path")
-	v.BindEnv("settings.send_original")
-	v.BindEnv("settings.send_compressed")
 
 	// Read config file (optional)
 	if err := v.ReadInConfig(); err != nil {
@@ -123,9 +117,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Image.JPEGQuality < 1 || c.Image.JPEGQuality > 100 {
 		return fmt.Errorf("image.jpeg_quality must be between 1 and 100")
-	}
-	if !c.Settings.SendOriginal && !c.Settings.SendCompressed {
-		return fmt.Errorf("at least one of settings.send_original or settings.send_compressed must be true")
 	}
 	return nil
 }

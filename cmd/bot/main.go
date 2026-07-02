@@ -12,9 +12,9 @@ import (
 	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	"comfy-tg-bot/internal/config"
+	"comfy-tg-bot/internal/generations"
 	"comfy-tg-bot/internal/image"
 	"comfy-tg-bot/internal/limiter"
-	"comfy-tg-bot/internal/settings"
 	"comfy-tg-bot/internal/telegram"
 )
 
@@ -73,17 +73,13 @@ func main() {
 	// Initialize user limiter (0 = no global limit, just per-user)
 	userLimiter := limiter.NewUserLimiter(0)
 
-	// Initialize settings store
-	settingsDefaults := settings.DefaultSettings{
-		SendOriginal:   cfg.Settings.SendOriginal,
-		SendCompressed: cfg.Settings.SendCompressed,
-	}
-	settingsStore, err := settings.NewSQLiteStore(cfg.Settings.DatabasePath, settingsDefaults)
+	// Initialize generations store (tracks prompt + ComfyUI file ref per image)
+	generationsStore, err := generations.NewSQLiteStore(cfg.Settings.DatabasePath)
 	if err != nil {
-		logger.Error("failed to create settings store", "error", err)
+		logger.Error("failed to create generations store", "error", err)
 		os.Exit(1)
 	}
-	defer settingsStore.Close()
+	defer generationsStore.Close()
 
 	// Initialize admin store (uses same database directory)
 	adminStore, err := admin.NewSQLiteStore(cfg.Settings.DatabasePath)
@@ -94,7 +90,7 @@ func main() {
 	defer adminStore.Close()
 
 	// Initialize Telegram bot
-	bot, err := telegram.NewBot(cfg.Telegram, comfyClient, imageProcessor, userLimiter, settingsStore, adminStore, logger)
+	bot, err := telegram.NewBot(cfg.Telegram, comfyClient, imageProcessor, userLimiter, generationsStore, adminStore, logger)
 	if err != nil {
 		logger.Error("failed to create telegram bot", "error", err)
 		os.Exit(1)

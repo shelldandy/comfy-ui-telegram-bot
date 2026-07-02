@@ -9,25 +9,26 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/uuid"
 
 	"comfy-tg-bot/internal/admin"
 	"comfy-tg-bot/internal/comfyui"
 	apperrors "comfy-tg-bot/internal/errors"
+	"comfy-tg-bot/internal/generations"
 	"comfy-tg-bot/internal/image"
 	"comfy-tg-bot/internal/limiter"
-	"comfy-tg-bot/internal/settings"
 )
 
 // Handler processes Telegram updates
 type Handler struct {
-	bot        *tgbotapi.BotAPI
-	comfy      *comfyui.Client
-	processor  *image.Processor
-	whitelist  *Whitelist
-	limiter    *limiter.UserLimiter
-	settings   settings.Store
-	adminStore admin.Store
-	logger     *slog.Logger
+	bot         *tgbotapi.BotAPI
+	comfy       *comfyui.Client
+	processor   *image.Processor
+	whitelist   *Whitelist
+	limiter     *limiter.UserLimiter
+	generations generations.Store
+	adminStore  admin.Store
+	logger      *slog.Logger
 }
 
 // NewHandler creates a new update handler
@@ -37,19 +38,19 @@ func NewHandler(
 	processor *image.Processor,
 	whitelist *Whitelist,
 	limiter *limiter.UserLimiter,
-	settingsStore settings.Store,
+	generationsStore generations.Store,
 	adminStore admin.Store,
 	logger *slog.Logger,
 ) *Handler {
 	return &Handler{
-		bot:        bot,
-		comfy:      comfy,
-		processor:  processor,
-		whitelist:  whitelist,
-		limiter:    limiter,
-		settings:   settingsStore,
-		adminStore: adminStore,
-		logger:     logger,
+		bot:         bot,
+		comfy:       comfy,
+		processor:   processor,
+		whitelist:   whitelist,
+		limiter:     limiter,
+		generations: generationsStore,
+		adminStore:  adminStore,
+		logger:      logger,
 	}
 }
 
@@ -84,7 +85,9 @@ func (h *Handler) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 
 	// Handle callback queries (inline button presses)
 	if update.CallbackQuery != nil {
-		h.handleSettingsCallback(ctx, update.CallbackQuery)
+		if strings.HasPrefix(update.CallbackQuery.Data, "gen:") {
+			h.handleGenerationCallback(ctx, update.CallbackQuery)
+		}
 		return
 	}
 
@@ -130,8 +133,9 @@ func (h *Handler) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		helpText := "Simply send me a text description of the image you want to generate.\n\n" +
 			"For example: \"A beautiful sunset over mountains with a lake reflection\"\n\n" +
 			"In groups, mention me with @" + h.bot.Self.UserName + " followed by your prompt.\n\n" +
+			"Each generated image comes with buttons to copy the original prompt or " +
+			"download it in full resolution.\n\n" +
 			"Commands:\n" +
-			"/settings - Configure image delivery preferences\n" +
 			"/status - Check ComfyUI server status"
 
 		if h.whitelist.IsAdmin(msg.From.ID) {
@@ -144,9 +148,6 @@ func (h *Handler) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 
 	case "status":
 		h.handleStatus(ctx, msg)
-
-	case "settings":
-		h.handleSettings(ctx, msg)
 
 	case "revoke":
 		h.handleRevoke(ctx, msg)
@@ -196,7 +197,7 @@ func (h *Handler) handlePrompt(ctx context.Context, msg *tgbotapi.Message, userI
 	// Generate image
 	h.logger.Info("starting generation", "user_id", userID, "prompt_length", len(prompt))
 
-	imageData, err := h.comfy.GenerateImage(ctx, prompt)
+	imageData, imgRef, err := h.comfy.GenerateImage(ctx, prompt)
 	if err != nil {
 		h.logger.Error("generation failed", "error", err, "user_id", userID)
 		h.sendText(msg.Chat.ID, apperrors.GetUserMessage(err))
@@ -227,164 +228,108 @@ func (h *Handler) handlePrompt(ctx context.Context, msg *tgbotapi.Message, userI
 		h.bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
 	}
 
-	// Get user settings
-	userSettings, err := h.settings.Get(userID)
-	if err != nil {
-		h.logger.Error("failed to get user settings", "error", err, "user_id", userID)
-		// Fall back to sending both
-		userSettings = &settings.UserSettings{
-			UserID:         userID,
-			SendOriginal:   true,
-			SendCompressed: true,
-		}
-	}
+	// Persist the prompt + ComfyUI file reference so the action buttons can
+	// recall the full prompt and re-download the original on demand.
+	genID := h.saveGeneration(userID, prompt, imgRef)
 
-	// Send compressed version as photo (for preview)
-	if userSettings.SendCompressed {
-		photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{
-			Name:  "image.jpg",
-			Bytes: result.Compressed,
-		})
-		photoMsg.Caption = fmt.Sprintf("Prompt: %s", truncate(prompt, 200))
-		if _, err := h.bot.Send(photoMsg); err != nil {
-			h.logger.Error("failed to send photo", "error", err)
-		}
+	// Send compressed version as photo (for preview) with action buttons
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{
+		Name:  "image.jpg",
+		Bytes: result.Compressed,
+	})
+	photoMsg.Caption = fmt.Sprintf("Prompt: %s", truncate(prompt, 200))
+	if genID != "" {
+		photoMsg.ReplyMarkup = generationKeyboard(genID)
 	}
-
-	// Send original as document
-	if userSettings.SendOriginal {
-		docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{
-			Name:  "image.png",
-			Bytes: result.Original,
-		})
-		caption := "Original PNG"
-		if !userSettings.SendCompressed {
-			// If not sending compressed, include prompt in original caption
-			caption = fmt.Sprintf("Prompt: %s", truncate(prompt, 200))
-		}
-		docMsg.Caption = caption
-		if _, err := h.bot.Send(docMsg); err != nil {
-			h.logger.Error("failed to send document", "error", err)
-		}
+	if _, err := h.bot.Send(photoMsg); err != nil {
+		h.logger.Error("failed to send photo", "error", err)
 	}
 }
 
-func (h *Handler) handleSettings(ctx context.Context, msg *tgbotapi.Message) {
-	userID := msg.From.ID
-
-	userSettings, err := h.settings.Get(userID)
-	if err != nil {
-		h.logger.Error("failed to get user settings", "error", err, "user_id", userID)
-		h.sendText(msg.Chat.ID, "Failed to load settings. Please try again.")
-		return
+// saveGeneration persists a generation record and returns its short ID, used as
+// the key in the action buttons' callback data. Returns "" on failure (the image
+// is still sent, just without working buttons).
+func (h *Handler) saveGeneration(userID int64, prompt string, ref comfyui.ImageOutput) string {
+	id := uuid.NewString()[:12]
+	rec := &generations.Record{
+		ID:        id,
+		UserID:    userID,
+		Prompt:    prompt,
+		Filename:  ref.Filename,
+		Subfolder: ref.Subfolder,
+		ImgType:   ref.Type,
+		CreatedAt: time.Now(),
 	}
-
-	text := h.formatSettingsMessage(userSettings)
-	keyboard := h.buildSettingsKeyboard(userSettings)
-
-	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
-	reply.ReplyMarkup = keyboard
-	if _, err := h.bot.Send(reply); err != nil {
-		h.logger.Error("failed to send settings message", "error", err)
+	if err := h.generations.Save(rec); err != nil {
+		h.logger.Error("failed to save generation", "error", err, "user_id", userID)
+		return ""
 	}
+	return id
 }
 
-func (h *Handler) handleSettingsCallback(ctx context.Context, query *tgbotapi.CallbackQuery) {
-	userID := query.From.ID
-	data := query.Data
-
-	// Only handle settings callbacks
-	if !strings.HasPrefix(data, "settings:") {
-		return
-	}
-
-	action := strings.TrimPrefix(data, "settings:")
-
-	userSettings, err := h.settings.Get(userID)
-	if err != nil {
-		h.logger.Error("failed to get user settings", "error", err, "user_id", userID)
-		h.answerCallback(query.ID, "Failed to load settings")
-		return
-	}
-
-	// Toggle the appropriate setting
-	switch action {
-	case "toggle_original":
-		userSettings.SendOriginal = !userSettings.SendOriginal
-	case "toggle_compressed":
-		userSettings.SendCompressed = !userSettings.SendCompressed
-	default:
-		h.answerCallback(query.ID, "Unknown action")
-		return
-	}
-
-	// Validate settings
-	if err := userSettings.Validate(); err != nil {
-		h.answerCallback(query.ID, "At least one format must be enabled")
-		return
-	}
-
-	// Save updated settings
-	if err := h.settings.Save(userSettings); err != nil {
-		h.logger.Error("failed to save user settings", "error", err, "user_id", userID)
-		h.answerCallback(query.ID, "Failed to save settings")
-		return
-	}
-
-	// Update the message with new keyboard state
-	text := h.formatSettingsMessage(userSettings)
-	keyboard := h.buildSettingsKeyboard(userSettings)
-
-	edit := tgbotapi.NewEditMessageTextAndMarkup(
-		query.Message.Chat.ID,
-		query.Message.MessageID,
-		text,
-		keyboard,
-	)
-	if _, err := h.bot.Send(edit); err != nil {
-		h.logger.Error("failed to edit settings message", "error", err)
-	}
-
-	h.answerCallback(query.ID, "Settings updated")
-}
-
-func (h *Handler) formatSettingsMessage(s *settings.UserSettings) string {
-	originalStatus := "OFF"
-	if s.SendOriginal {
-		originalStatus = "ON"
-	}
-	compressedStatus := "OFF"
-	if s.SendCompressed {
-		compressedStatus = "ON"
-	}
-
-	return fmt.Sprintf(
-		"Your Settings:\n\n"+
-			"Send Original PNG: %s\n"+
-			"Send Compressed JPEG: %s",
-		originalStatus, compressedStatus,
-	)
-}
-
-func (h *Handler) buildSettingsKeyboard(s *settings.UserSettings) tgbotapi.InlineKeyboardMarkup {
-	originalText := "Original PNG: OFF"
-	if s.SendOriginal {
-		originalText = "Original PNG: ON"
-	}
-
-	compressedText := "Compressed JPEG: OFF"
-	if s.SendCompressed {
-		compressedText = "Compressed JPEG: ON"
-	}
-
+// generationKeyboard builds the two action buttons attached to a generated image.
+func generationKeyboard(id string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(originalText, "settings:toggle_original"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(compressedText, "settings:toggle_compressed"),
+			tgbotapi.NewInlineKeyboardButtonData("📋 Copy prompt", "gen:prompt:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("🖼 Original size", "gen:orig:"+id),
 		),
 	)
+}
+
+// handleGenerationCallback services the "Copy prompt" and "Original size" buttons.
+func (h *Handler) handleGenerationCallback(ctx context.Context, query *tgbotapi.CallbackQuery) {
+	parts := strings.SplitN(strings.TrimPrefix(query.Data, "gen:"), ":", 2)
+	if len(parts) != 2 {
+		h.answerCallback(query.ID, "Invalid action")
+		return
+	}
+	action, id := parts[0], parts[1]
+
+	rec, err := h.generations.Get(id)
+	if err != nil {
+		h.logger.Error("failed to get generation", "error", err, "id", id)
+		h.answerCallback(query.ID, "Something went wrong")
+		return
+	}
+	if rec == nil {
+		h.answerCallback(query.ID, "This image is no longer available.")
+		return
+	}
+
+	chatID := query.Message.Chat.ID
+
+	switch action {
+	case "prompt":
+		// Send the full prompt as a tap-to-copy code block.
+		reply := tgbotapi.NewMessage(chatID, "<code>"+tgbotapi.EscapeText(tgbotapi.ModeHTML, rec.Prompt)+"</code>")
+		reply.ParseMode = tgbotapi.ModeHTML
+		reply.ReplyToMessageID = query.Message.MessageID
+		if _, err := h.bot.Send(reply); err != nil {
+			h.logger.Error("failed to send prompt", "error", err)
+		}
+		h.answerCallback(query.ID, "Prompt sent")
+
+	case "orig":
+		h.answerCallback(query.ID, "Fetching original…")
+		data, err := h.comfy.GetImage(ctx, rec.Filename, rec.Subfolder, rec.ImgType)
+		if err != nil {
+			h.logger.Error("failed to fetch original image", "error", err, "id", id)
+			h.sendText(chatID, "Couldn't retrieve the original image.")
+			return
+		}
+		docMsg := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
+			Name:  "image.png",
+			Bytes: data,
+		})
+		docMsg.ReplyToMessageID = query.Message.MessageID
+		if _, err := h.bot.Send(docMsg); err != nil {
+			h.logger.Error("failed to send original document", "error", err)
+		}
+
+	default:
+		h.answerCallback(query.ID, "Unknown action")
+	}
 }
 
 func (h *Handler) answerCallback(callbackID string, text string) {
@@ -710,7 +655,7 @@ func (h *Handler) handleGroupPrompt(ctx context.Context, msg *tgbotapi.Message, 
 		"group_id", groupID,
 		"prompt_length", len(prompt))
 
-	imageData, err := h.comfy.GenerateImage(ctx, prompt)
+	imageData, imgRef, err := h.comfy.GenerateImage(ctx, prompt)
 	if err != nil {
 		h.logger.Error("generation failed", "error", err, "user_id", userID, "group_id", groupID)
 		h.sendText(msg.Chat.ID, apperrors.GetUserMessage(err))
@@ -740,13 +685,19 @@ func (h *Handler) handleGroupPrompt(ctx context.Context, msg *tgbotapi.Message, 
 		h.bot.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
 	}
 
-	// Send ONLY compressed version for groups
+	// Persist the prompt + ComfyUI file reference for the action buttons.
+	genID := h.saveGeneration(userID, prompt, imgRef)
+
+	// Send ONLY compressed version for groups, with action buttons
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{
 		Name:  "image.jpg",
 		Bytes: result.Compressed,
 	})
 	photoMsg.Caption = fmt.Sprintf("Prompt: %s", truncate(prompt, 200))
 	photoMsg.ReplyToMessageID = msg.MessageID // Reply to the original request
+	if genID != "" {
+		photoMsg.ReplyMarkup = generationKeyboard(genID)
+	}
 
 	if _, err := h.bot.Send(photoMsg); err != nil {
 		h.logger.Error("failed to send photo to group", "error", err)
