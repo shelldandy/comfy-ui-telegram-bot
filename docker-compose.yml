@@ -11,6 +11,11 @@ services:
       - COMFY_BOT_COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
       - COMFY_BOT_COMFYUI_WEBSOCKET_URL=${COMFYUI_WEBSOCKET_URL:-ws://host.docker.internal:8188/ws}
       - COMFY_BOT_COMFYUI_WORKFLOW_PATH=/app/workflow.json
+      # Generations on the 780M iGPU (esp. under the gfx1100 HSA override) can take
+      # >5m; default request/comfyui timeouts are 5m, so raise both so slow renders
+      # aren't cut off mid-generation.
+      - COMFY_BOT_TELEGRAM_REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-20m}
+      - COMFY_BOT_COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-20m}
       - COMFY_BOT_LOGGING_LEVEL=${LOG_LEVEL:-info}
       - COMFY_BOT_LOGGING_JSON_FORMAT=${LOG_JSON:-true}
     volumes:
